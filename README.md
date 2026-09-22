@@ -144,18 +144,21 @@ git add .
 git status
 git commit -m "vclone: voice cloning + lip-synced talking video"
 git branch -M main
-git remote add origin https://github.com/<your-username>/<your-repo>.git
+git remote add origin https://github.com/dhanuvagman006/VedioFaceClone.git
+git config --global credential.helper manager
 git push -u origin main
 ```
+
+GitHub doesn't accept your account password for `git push`. The `credential.helper manager` line makes the push
+open a browser window to sign in, and the login is then remembered.
 
 Check that `git status` lists no `.mp4`, `.wav` or `.m4a` files before committing.
 
 **Run it in Colab.**
-1. Open `https://colab.research.google.com/github/<your-username>/<your-repo>/blob/main/colab.ipynb`
-   (or upload `colab.ipynb` at colab.research.google.com).
+1. Open **https://colab.research.google.com/github/dhanuvagman006/VedioFaceClone/blob/main/colab.ipynb**
 2. **Runtime → Change runtime type → T4 GPU.**
-3. Put your repo URL in `REPO_URL` and run the cells from top to bottom. They install everything, download
-   the models, ask you to upload the video, and give you the talking video to download.
+3. Run the cells from top to bottom. They install everything, download the models, ask you to upload the
+   video, and give you the talking video to download.
 
 Colab notes:
 * A Colab machine is wiped when the session ends, so setup runs again in each new session (~5–10 min). Set
