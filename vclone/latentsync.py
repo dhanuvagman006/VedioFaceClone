@@ -9,6 +9,7 @@ models licensed for non-commercial use only."""
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import shutil
@@ -17,10 +18,11 @@ import tempfile
 import time
 from pathlib import Path
 
+import numpy as np
 import soundfile as sf
 
 from . import audio as A
-from .lipsync import AI_TAG, AVATARS_DIR, FPS, _file_hash
+from .lipsync import AI_TAG, AVATARS_DIR, FPS, _file_hash, facing_camera, footage_note
 from .models import LATENTSYNC_CODE, LATENTSYNC_FILES, LATENTSYNC_REPO, LIPSYNC_FILES, SD_VAE_REPO, model_dir
 
 MIN_GPU_GIB = 14      # auto mode needs Colab's T4 (15 GB) or bigger; smaller cards use MuseTalk
@@ -28,6 +30,7 @@ MAX_SIDE = 1280       # 720p: the face comes out near the model's 512 px, so the
 MAX_SECONDS = 60      # face footage used; shorter videos play forward then backward
 SEGMENT_SECONDS = 30  # LatentSync keeps every frame in RAM, so longer scripts are rendered in 30 s pieces
 RUNNER = Path(__file__).with_name("latentsync_runner.py")
+FACES = Path(__file__).with_name("latentsync_faces.py")
 READY = LATENTSYNC_CODE / ".venv" / "vclone-ready"  # setup.sh writes it once the environment is complete
 # The face video is cached near-losslessly, and temporary copies even more so: LatentSync re-encodes once
 # more (crf 13), and every lossy generation would soften the real footage around the new mouth.
@@ -70,25 +73,58 @@ def _ffmpeg(*args, what: str) -> None:
 
 
 def prepare_face(src: str | Path, *, refresh: bool = False, log=print) -> Path:
-    """The face video as upright 25 fps 720p, played forward and then backward, so looping it to any
-    length never jumps. Cached in avatars/; runs before the voice so a bad video fails early."""
+    """The face video as upright 25 fps 720p, cut to its longest stretch facing the camera, played forward
+    and then backward, so looping it to any length never jumps, a moment where the person looks away never
+    shows up, and LatentSync never meets a frame without a face. Cached in avatars/; runs before the voice,
+    so a bad video fails early."""
+    if not installed():
+        raise RuntimeError("LatentSync isn't set up here: run `bash setup.sh` (Linux/Colab) or use --lipsync musetalk")
     src = Path(src).expanduser().resolve()
-    key = hashlib.sha1(f"{_file_hash(src)}|latentsync2|{MAX_SIDE}|{MAX_SECONDS}".encode()).hexdigest()[:10]
+    key = hashlib.sha1(f"{_file_hash(src)}|latentsync3|{MAX_SIDE}|{MAX_SECONDS}".encode()).hexdigest()[:10]
     stem = "".join(c if c.isalnum() or c in "-_" else "_" for c in src.stem)[:40]
     folder = AVATARS_DIR / f"{stem}-{key}"
-    cycle = folder / "latentsync_cycle.mp4"
-    if cycle.exists() and not refresh:
+    cycle, info_path = folder / "latentsync_cycle.mp4", folder / "info.json"
+    if cycle.exists() and info_path.exists() and not refresh:
         log(f"[face] using cached face video {folder.name}")
         return cycle
     log(f"[face] preparing {src.name} (one time; cached in {folder.name})")
     folder.mkdir(parents=True, exist_ok=True)
+    info_path.unlink(missing_ok=True)
+    _link_checkpoints(model_dir(LATENTSYNC_REPO, allow_patterns=LATENTSYNC_FILES))  # the face models land there
+    scale = (f"fps={FPS},scale='min({MAX_SIDE},iw)':'min({MAX_SIDE},ih)':force_original_aspect_ratio=decrease,"
+             "scale=trunc(iw/2)*2:trunc(ih/2)*2")
+    with tempfile.TemporaryDirectory(prefix="vclone_face_") as tmp_dir:
+        frames = Path(tmp_dir) / "face.mp4"
+        _ffmpeg("-t", MAX_SECONDS, "-i", src, "-an", "-vf", scale, *TEMP_X264, frames,
+                what=f"read the face video {src.name}")
+        found, points = _find_faces(frames, Path(tmp_dir))
+    np.savez(folder / "latentsync_faces.npz", found=found, points=points)
+    start, end, away = facing_camera(points, found)
+    note = footage_note(len(found), start, end, away)
+    if note:
+        log(note)
+    # Cut from the original again (same frame numbering), so the cached copy is one encode from the source.
     tmp = folder / "latentsync_cycle.tmp.mp4"
-    graph = (f"[0:v]fps={FPS},scale='min({MAX_SIDE},iw)':'min({MAX_SIDE},ih)':force_original_aspect_ratio=decrease,"
-             "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p,split[a][b];[b]reverse[r];[a][r]concat=n=2:v=1:a=0[v]")
+    # Frame N at exactly N/25 s, every frame with its duration (trim drops it): otherwise the file comes out a
+    # frame short, and looping it (-stream_loop) would collide at every loop point.
+    graph = (f"[0:v]{scale},format=yuv420p,trim=start_frame={start}:end_frame={end},setpts=PTS-STARTPTS,"
+             f"split[a][b];[b]reverse[r];[a][r]concat=n=2:v=1:a=0,setpts=N/({FPS}*TB),fps={FPS}[v]")
     _ffmpeg("-t", MAX_SECONDS, "-i", src, "-filter_complex", graph, "-map", "[v]", "-an", *CACHE_X264, tmp,
-            what=f"read the face video {src.name}")
+            what=f"cut the face video {src.name}")
     tmp.replace(cycle)
+    info_path.write_text(json.dumps({
+        "source": str(src), "frames": len(found), "fps": FPS, "used_frames": [start, end],
+        "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }, indent=2), encoding="utf-8")
     return cycle
+
+
+def _find_faces(video: Path, work: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Per frame of `video`: whether LatentSync's face detector finds a face, and its 5 points."""
+    result = work / "faces.npz"
+    _in_env(FACES, ["--video", video, "--out", result], what="check the face video")
+    with np.load(result) as data:
+        return data["found"], data["points"]
 
 
 def _link_checkpoints(weights: Path) -> None:
@@ -106,19 +142,26 @@ def _link_checkpoints(weights: Path) -> None:
     link.symlink_to(weights.resolve(), target_is_directory=True)
 
 
-def _run(video: Path, audio: Path, out: Path, *, vae: Path, steps: int, seed: int, frames: int, work: Path) -> None:
-    """One LatentSync pass in its own environment. Its progress bars print straight to this console."""
-    runner = LATENTSYNC_CODE / "vclone_runner.py"  # inside LatentSync's folder, so its imports resolve there
-    shutil.copyfile(RUNNER, runner)
+def _in_env(script: Path, args: list, *, what: str) -> None:
+    """Run one of vclone's scripts in LatentSync's own environment, from LatentSync's folder so its imports and
+    relative paths (configs/, checkpoints/) resolve. Its messages and progress bars print straight here."""
+    target = LATENTSYNC_CODE / f"vclone_{script.stem.split('_', 1)[1]}.py"  # vclone_runner.py, vclone_faces.py
+    shutil.copyfile(script, target)
     # Keep this environment's settings out of it: vclone's paths, and a notebook's matplotlib backend (Colab
     # exports its inline backend, which LatentSync's environment lacks, so matplotlib refuses to import).
     env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "MPLBACKEND")}
     env.update(PYTHONUNBUFFERED="1", MPLBACKEND="Agg", NO_ALBUMENTATIONS_UPDATE="1")  # stay offline, headless
-    cmd = [str(python()), runner.name, "--video", video, "--audio", audio, "--out", out, "--vae", vae,
-           "--steps", steps, "--seed", seed, "--frames", frames, "--temp", work]
-    proc = subprocess.run([str(c) for c in cmd], cwd=str(LATENTSYNC_CODE), env=env)
-    if proc.returncode != 0 or not out.exists():
-        raise RuntimeError("LatentSync failed (see its messages above)")
+    proc = subprocess.run([str(python()), target.name, *map(str, args)], cwd=str(LATENTSYNC_CODE), env=env)
+    if proc.returncode != 0:
+        raise RuntimeError(f"LatentSync could not {what} (see its messages above)")
+
+
+def _run(video: Path, audio: Path, out: Path, *, vae: Path, steps: int, seed: int, frames: int, work: Path) -> None:
+    """One LatentSync pass (latentsync_runner.py)."""
+    _in_env(RUNNER, ["--video", video, "--audio", audio, "--out", out, "--vae", vae, "--steps", steps,
+                     "--seed", seed, "--frames", frames, "--temp", work], what="lip-sync the video")
+    if not out.exists():
+        raise RuntimeError("LatentSync finished without writing the video (see its messages above)")
 
 
 def render(cycle: Path, audio: Path, out: Path, *, steps: int = 20, seed: int = 1247, log=print) -> Path:

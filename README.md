@@ -25,10 +25,13 @@ Results go to `outputs\` unless you pass `-o`. The first run with a new video an
 ## 1. Record the input (this matters most for quality)
 
 **The video** (for talking videos):
-* 25–60 seconds of the person talking to the camera. Face visible and roughly front-on **in every frame**
-  (LatentSync stops at a frame without a face), good light, steady camera.
+* 25–60 seconds of the person talking to the camera. Face visible and roughly front-on, good light, steady camera.
 * The output reuses their real footage, so record the head movement and expressions you want to see
   (e.g. friendly and relaxed). Only the mouth region is regenerated.
+* Looking away for a moment is fine: the output replays only the **longest stretch where the face is turned to
+  the camera** (head turns past ~20° and moments without a visible face are left out). The log names the seconds
+  it used, e.g. `using 11.0-30.0s of the video ... (turned away or hidden at 9.2-10.8s)`. The longer that
+  stretch, the less the footage repeats.
 * One person, nothing covering the mouth. Portrait or landscape both work; the output is 720p with LatentSync
   (the face then comes out at the model's own 512 px) and up to 1080p with MuseTalk.
 
@@ -95,8 +98,8 @@ Works from any folder, e.g. `D:\GPU\speak.bat C:\rec\me.mp4 "Hi"`. Run `speak.ba
 * **Voice:** cloned from the recording. Best of 3 takes, each checked by Whisper for misread words and
   by a speaker-verification model for how much it sounds like the person.
 * **Lip sync:** the lower face is regenerated to match every syllable and blended into the real footage. Head
-  motion, blinks and eyes are the person's own. If the script is longer than the video, the footage plays
-  forward then backward, so there are no jumps.
+  motion, blinks and eyes are the person's own. The footage used is the longest stretch facing the camera; if the
+  script is longer, it plays forward then backward, so there are no jumps and no moment of looking away.
   * **LatentSync 1.6** (15 GB+ GPUs, e.g. Colab): a latent diffusion model working on the face at 512×512,
     16 frames at a time, trained against a lip-sync expert network. Sharp, steady (no frame-to-frame jitter)
     and accurate: the realistic option. Slow: roughly 20–40 min per 30 s of video on a T4, a few minutes on
@@ -130,13 +133,15 @@ Every video is tagged `AI-generated` in its MP4 metadata.
 recording ─► voice clip: decode, trim, shorten pauses, pick best 5-12 s, level ─► transcript (script words
              or Whisper, language limited to what the voice model speaks) ─► cached in voices\
 face video ─► 25 fps frames ─► face box per frame (68 landmarks, smoothed) ─► VAE latents + jaw-shaped blend
-             masks (face parsing) ─► cached in avatars\
+             masks (face parsing) ─► cached in avatars\ ─► at render: the longest stretch facing the camera (the
+             nose tip's offset from the eyes' centre line shows head turns)
 text ─► clean ─► sentence-aware chunks ─► Qwen3-TTS clones the voice: 3 takes per chunk (bf16, CUDA graphs)
 check ─► Whisper word errors + WavLM voice match + pace ─► best take per chunk; misread chunks get another round
 master ─► natural pauses, -18 LUFS, peak limiter
 lip sync ─► Whisper-tiny audio features ─► MuseTalk UNet (one step, fp16) ─► VAE decode ─► blend mouth into
             the real frame ─► GFPGAN sharpens the mouth (aligned 512 px face, fixed noise) ─► H.264 + AAC MP4
-LatentSync ─► face video as 25 fps 720p, forward + backward (cached) ─► voice made in a separate process that
+LatentSync ─► face video as 25 fps 720p ─► LatentSync's own face detector checks every frame ─► the longest
+            stretch facing the camera, forward + backward (cached) ─► voice made in a separate process that
             exits, freeing the GPU ─► LatentSync 1.6 in its own environment: InsightFace aligns each face to
             512 px ─► 20 DDIM steps per 16 frames ─► paste back ─► 30 s pieces joined to the frame ─► MP4
 ```
@@ -203,8 +208,10 @@ Colab notes:
 * **Doesn't sound like the person**: have them read the `--script` text in the recording (in a quiet room);
   check the transcript it prints / `ref.txt`; try `--quality max`.
 * **A word is mispronounced**: run again (new seed) or `--quality max`. Spell unusual names phonetically.
-* **"A face was found in only N frames"** (MuseTalk) or **"Face not detected"** (LatentSync): use a video where
-  the face stays visible and front-on in every frame.
+* **"The face is turned away or hidden in most of the video"**: under a second of the video shows the face
+  turned to the camera. Record again looking at the camera for at least a few seconds (ideally 25+).
+* **The output repeats a short clip**: the log's `using ...s of the video` line shows how much faced the camera;
+  a recording that faces the camera throughout gives the most varied footage.
 * **LatentSync takes too long**: `--lipsync-steps 12`, a faster Colab GPU, or `--lipsync musetalk` for drafts.
 * **Mouth looks soft** (MuseTalk on a 1080p close-up): expected at 256 px; use LatentSync, or film slightly
   further away.

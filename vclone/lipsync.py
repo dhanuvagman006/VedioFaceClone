@@ -28,6 +28,9 @@ FPS = 25            # MuseTalk 1.5 was trained on 25 fps video
 FACE = 256          # face crop resolution the model works at
 MAX_SECONDS = 60    # longer face videos are trimmed; shorter ones play forward then backward
 MAX_SIDE = 1920     # 4K phone video is scaled down to 1080p
+TURN = 0.15         # nose off the eyes' centre line by this many eye distances more than usual: a ~20-25 deg turn
+SIDE = 0.35         # ... and by this much from dead centre: the face is seen half from the side (~40-45 deg)
+TURN_MARGIN = 6     # frames also left out next to a turn: its first frames already move
 AVATARS_DIR = ROOT / "avatars"
 PREP_VERSION = 2  # v2 adds points.npy (face restoration)
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".wmv"}
@@ -62,6 +65,7 @@ class Avatar:
     latents: torch.Tensor   # (N, 8, 32, 32) fp16: masked + reference VAE latents per frame
     size: tuple[int, int]   # frame width, height
     points: np.ndarray      # (N, 5, 2) eye centres, nose tip, mouth corners: aligns the face restoration
+    found: np.ndarray       # (N,) the face was detected (other frames borrow boxes from their neighbours)
 
     def mask(self, i: int) -> np.ndarray:
         return cv2.imread(str(self.folder / "masks" / f"{i:06d}.png"), cv2.IMREAD_GRAYSCALE)
@@ -113,6 +117,55 @@ def _smooth(values: np.ndarray, window: int = 5) -> np.ndarray:
     return np.stack([np.convolve(padded[:, c], kernel, mode="valid") for c in range(values.shape[1])], axis=1)
 
 
+def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
+    """[start, end) of every stretch of True values."""
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], mask.astype(np.int8), [0]])))
+    return [(int(a), int(b)) for a, b in zip(edges[::2], edges[1::2])]
+
+
+def facing_camera(points: np.ndarray, found: np.ndarray) -> tuple[int, int, list[tuple[int, int]]]:
+    """The footage a talking video replays: [start, end) of the longest stretch where the face is found and
+    not turned away (more than ~20-25 degrees from the person's usual pose), and the frame ranges where it
+    is turned away or missing. Played forward and back, that stretch never shows the person looking away.
+    A head turn moves the nose tip sideways off the line between the eyes; measured in eye distances, that
+    doesn't depend on the face's size, position or tilt."""
+    n = len(points)
+    if n == 0 or not found.any():
+        raise ValueError("No face was found in the video. Use a video where the face is visible and front-on.")
+    if n == 1:  # a photo
+        return 0, 1, []
+    left, right, nose = points[:, 0], points[:, 1], points[:, 2]
+    eyes = right - left
+    turn = np.einsum("ij,ij->i", nose - (left + right) / 2, eyes) / np.maximum(np.einsum("ij,ij->i", eyes, eyes), 1e-6)
+    turn = np.where(found & np.isfinite(turn), turn, np.inf)
+    turn = np.median(np.lib.stride_tricks.sliding_window_view(np.pad(turn, 2, mode="edge"), 5), axis=1)  # jitter
+    ok = found & np.isfinite(turn)  # after smoothing too: LatentSync stops at any frame without a face
+    if ok.any():
+        # The person's usual pose, from frames not seen half from the side, so a video that mostly looks away
+        # doesn't make looking away the norm. (A camera off to one side just shifts it; that's fine.)
+        front = ok & (np.abs(turn) <= SIDE)
+        ok &= np.abs(turn - np.median(turn[front if front.any() else ok])) <= TURN
+    runs = _runs(ok)
+    start, end = max(runs, key=lambda r: r[1] - r[0]) if runs else (0, 0)
+    longest = end - start
+    start += TURN_MARGIN if start > 0 else 0
+    end -= TURN_MARGIN if end < n else 0
+    if end - start < min(FPS, n):
+        raise ValueError(f"The face is turned away or hidden in most of the video: the longest stretch facing "
+                         f"the camera is {longest / FPS:.1f}s. Use a video where the person faces the camera for "
+                         "at least a few seconds.")
+    return start, end, [(a, b) for a, b in _runs(~ok) if b - a >= 3]
+
+
+def footage_note(n: int, start: int, end: int, away: list[tuple[int, int]]) -> str | None:
+    """The progress line saying which part of the face video is used, when it isn't all of it."""
+    if start == 0 and end == n:
+        return None
+    where = ", ".join(f"{a / FPS:.1f}-{b / FPS:.1f}s" for a, b in away) or "briefly"
+    return (f"[face] using {start / FPS:.1f}-{end / FPS:.1f}s of the video, the longest part facing the camera "
+            f"(turned away or hidden at {where})")
+
+
 def _detect_face(fa, rgb: np.ndarray) -> np.ndarray | None:
     """Largest face box in full-resolution coordinates, detected on a small copy (the detector's
     post-processing is slow at full size)."""
@@ -125,12 +178,14 @@ def _detect_face(fa, rgb: np.ndarray) -> np.ndarray | None:
     return np.array(det[:4], dtype=np.float64) / scale
 
 
-def _face_boxes(frames: list[Path], device: str, log, detect_every: int = 10) -> tuple[np.ndarray, np.ndarray]:
+def _face_boxes(frames: list[Path], device: str, log,
+                detect_every: int = 10) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """MuseTalk's face box from 68 facial landmarks: from the chin up to the same distance above
     the nose, and landmark-wide. (MuseTalk gets the landmarks from DWPose, which needs mmcv; FAN
     gives the same 68-point layout without it.) The detector runs every few frames; in between,
     its box follows the landmarks, which is far faster and just as accurate for a talking head.
-    Also returns 5 points per frame (eyes, nose, mouth corners) for aligning the face restoration."""
+    Also returns 5 points per frame (eyes, nose, mouth corners) for aligning the face restoration and
+    spotting head turns, and which frames had a face."""
     import face_alignment
 
     from .restore import five_points
@@ -172,16 +227,16 @@ def _face_boxes(frames: list[Path], device: str, log, detect_every: int = 10) ->
     del fa
     free_gpu()
     found = ~np.isnan(boxes[:, 0])
-    if found.sum() < max(1, 0.8 * len(frames)):
-        raise ValueError(f"A face was found in only {found.sum()} of {len(frames)} frames. Use a video where "
-                         "the face stays visible, front-on and well lit.")
+    if not found.any():
+        raise ValueError("No face was found in the video. Use a video where the face is visible, front-on and "
+                         "well lit.")
     idx = np.arange(len(frames))
     flat = points.reshape(len(frames), 10)
-    for c in range(4):  # frames where the face was missed borrow from their neighbours
+    for c in range(4):  # frames where the face was missed borrow from their neighbours (render skips them)
         boxes[:, c] = np.interp(idx, idx[found], boxes[found, c])
     for c in range(10):
         flat[:, c] = np.interp(idx, idx[found], flat[found, c])
-    return np.round(_smooth(boxes)).astype(int), _smooth(flat).reshape(-1, 5, 2).astype(np.float32)
+    return np.round(_smooth(boxes)).astype(int), _smooth(flat).reshape(-1, 5, 2).astype(np.float32), found
 
 
 @torch.inference_mode()
@@ -274,11 +329,13 @@ def prepare_avatar(src: str | Path, device: str, *, refresh: bool = False, max_s
         frames = _extract_frames(src, folder / "frames", max_seconds)
         size = cv2.imread(str(frames[0])).shape[1::-1]
         log(f"[face] {len(frames)} frames at {size[0]}x{size[1]}, {FPS} fps")
-        boxes, points = _face_boxes(frames, device, log)
+        boxes, points, found = _face_boxes(frames, device, log)
+        facing_camera(points, found)  # an unusable video fails here, before the slow work
         latents = _encode_latents(frames, boxes, device)
         crop_boxes = _blend_masks(frames, boxes, folder / "masks", device, log)
         np.save(folder / "boxes.npy", boxes)
         np.save(folder / "points.npy", points)
+        np.save(folder / "found.npy", found)
         np.save(folder / "crop_boxes.npy", crop_boxes)
         torch.save(latents, folder / "latents.pt")
         info_path.write_text(json.dumps({
@@ -293,8 +350,12 @@ def prepare_avatar(src: str | Path, device: str, *, refresh: bool = False, max_s
     latents = torch.load(folder / "latents.pt", weights_only=True)
     if len(frames) != info["frames"] or len(latents) != info["frames"]:
         raise RuntimeError(f"The face cache in {folder} is incomplete; run again with --refresh-face")
-    return Avatar(folder, frames, np.load(folder / "boxes.npy"), np.load(folder / "crop_boxes.npy"), latents,
-                  tuple(info["size"]), np.load(folder / "points.npy"))
+    found_path = folder / "found.npy"  # caches from before it was saved: count every frame as found
+    found = np.load(found_path) if found_path.exists() else np.ones(len(frames), bool)
+    avatar = Avatar(folder, frames, np.load(folder / "boxes.npy"), np.load(folder / "crop_boxes.npy"), latents,
+                    tuple(info["size"]), np.load(folder / "points.npy"), found)
+    facing_camera(avatar.points, avatar.found)  # fail before the voice work, not after it
+    return avatar
 
 
 # ----------------------------------------------------------------------------- rendering
@@ -433,8 +494,13 @@ def render(avatar: Avatar, audio: Path, out: Path, device: str, *, batch: int = 
         log(f"[face] lip-sync models ready in {time.time() - started:.0f}s "
             f"(GPU memory in use {torch.cuda.memory_reserved() / 2**30:.1f} GB)")
     timestep = torch.tensor([0], device=device)  # MuseTalk is a single-step model at t=0
-    # Forward then backward through the footage, so a script longer than the video never jumps.
-    order = list(range(len(avatar.frames))) + list(range(len(avatar.frames) - 1, -1, -1))
+    # Forward then backward through the footage, so a script longer than the video never jumps; only the
+    # longest part facing the camera, so a moment where the person looks away never shows up.
+    first, end, away = facing_camera(avatar.points, avatar.found)
+    note = footage_note(len(avatar.frames), first, end, away)
+    if note:
+        log(note)
+    order = list(range(first, end)) + list(range(end - 1, first - 1, -1))
     total = prompts.shape[0]
     log(f"[face] lip-syncing {total} frames ({total / FPS:.1f}s)")
     writer = _VideoWriter(out, avatar.size, audio)
