@@ -47,7 +47,9 @@ class MouthRestorer:
     @torch.inference_mode()
     def restore(self, faces: list[np.ndarray]) -> list[np.ndarray]:
         """Aligned 512x512 BGR uint8 faces in, restored faces out."""
-        x = torch.from_numpy(np.stack(faces)[..., ::-1].copy()).to(self.device).permute(0, 3, 1, 2).float()
+        # contiguous(): the permuted (channels-last) layout would make GFPGAN's internal .view() fail
+        x = torch.from_numpy(np.stack(faces)[..., ::-1].copy()).to(self.device).permute(0, 3, 1, 2)
+        x = x.contiguous().float()
         # Fixed (stored) noise instead of fresh random noise per frame: no shimmering texture in video.
         out = self.net(x / 127.5 - 1, return_rgb=False, randomize_noise=False)[0]
         out = ((out.clamp(-1, 1) + 1) * 127.5).round().byte().permute(0, 2, 3, 1).cpu().numpy()[..., ::-1]

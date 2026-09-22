@@ -392,8 +392,13 @@ def _restore_pass(avatar: Avatar, generated: list, composite_one, write, strengt
         frames = [composite_one(j, face) for j, face in part]
         if restorer is not None:
             idx = [j for j, _ in part]
-            restorer.process(frames, [avatar.points[j] for j in idx], [avatar.mask(j) for j in idx],
-                             [avatar.crop_boxes[j] for j in idx])
+            try:
+                restorer.process(frames, [avatar.points[j] for j in idx], [avatar.mask(j) for j in idx],
+                                 [avatar.crop_boxes[j] for j in idx])
+            except Exception as exc:  # sharpening is an extra: never lose the whole video to it
+                log(f"[face] mouth sharpening failed ({type(exc).__name__}: {exc}); finishing without it")
+                restorer = None
+                frames = [composite_one(j, face) for j, face in part]
         for frame in frames:
             write(frame)
         done = start + len(part)
@@ -451,7 +456,7 @@ def render(avatar: Avatar, audio: Path, out: Path, device: str, *, batch: int = 
         for j, face in zip(idx, faces):
             write(composite_one(j, face))
 
-    pending = None
+    pending, finished = None, False
     try:
         with ThreadPoolExecutor(max_workers=1) as pool:
             for start in range(0, total, batch):
@@ -479,8 +484,15 @@ def render(avatar: Avatar, audio: Path, out: Path, device: str, *, batch: int = 
             _restore_pass(avatar, generated, composite_one, write, restore, device, log)
         if last:
             writer.write(last[0])  # one spare frame so the video never ends before the audio
+        finished = True
     finally:
-        writer.close()
+        try:
+            writer.close()
+        except RuntimeError:
+            if finished:
+                raise
+        if not finished:
+            out.unlink(missing_ok=True)  # never leave a half-written, unplayable video behind
     free_gpu()
     log(f"[face] lip sync took {time.time() - started:.0f}s")
     return out

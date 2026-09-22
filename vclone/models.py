@@ -42,6 +42,11 @@ def setup_env() -> None:
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+    # Colab preinstalls TensorFlow and JAX/Flax; don't let transformers/diffusers load them (PyTorch only).
+    os.environ.setdefault("USE_TF", "0")
+    os.environ.setdefault("USE_FLAX", "0")
+    os.environ.setdefault("USE_TORCH", "1")
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
     os.environ.setdefault("PYTHONWARNINGS", "ignore")
     import warnings
     warnings.filterwarnings("ignore")
