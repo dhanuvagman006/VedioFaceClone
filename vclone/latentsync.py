@@ -110,10 +110,13 @@ def _run(video: Path, audio: Path, out: Path, *, vae: Path, steps: int, seed: in
     """One LatentSync pass in its own environment. Its progress bars print straight to this console."""
     runner = LATENTSYNC_CODE / "vclone_runner.py"  # inside LatentSync's folder, so its imports resolve there
     shutil.copyfile(RUNNER, runner)
-    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}  # keep vclone's paths out of it
+    # Keep this environment's settings out of it: vclone's paths, and a notebook's matplotlib backend (Colab
+    # exports its inline backend, which LatentSync's environment lacks, so matplotlib refuses to import).
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "MPLBACKEND")}
+    env.update(PYTHONUNBUFFERED="1", MPLBACKEND="Agg", NO_ALBUMENTATIONS_UPDATE="1")  # stay offline, headless
     cmd = [str(python()), runner.name, "--video", video, "--audio", audio, "--out", out, "--vae", vae,
            "--steps", steps, "--seed", seed, "--frames", frames, "--temp", work]
-    proc = subprocess.run([str(c) for c in cmd], cwd=str(LATENTSYNC_CODE), env=dict(env, PYTHONUNBUFFERED="1"))
+    proc = subprocess.run([str(c) for c in cmd], cwd=str(LATENTSYNC_CODE), env=env)
     if proc.returncode != 0 or not out.exists():
         raise RuntimeError("LatentSync failed (see its messages above)")
 
@@ -150,8 +153,9 @@ def render(cycle: Path, audio: Path, out: Path, *, steps: int = 20, seed: int = 
                         "-an", *TEMP_X264, video, what="cut the face video")
                 log(f"[face] LatentSync part {k + 1}/{parts} ({length:.0f}s of video)")
             else:
-                log(f"[face] LatentSync is lip-syncing {length:.1f}s of video (about 20-40 min on a T4, "
-                    "a few minutes on an A100)")
+                t4 = f"{max(1, round(length / 30 * 20))}-{max(2, round(length / 30 * 40))}"  # ~20-40 min per 30 s
+                log(f"[face] LatentSync is lip-syncing {length:.1f}s of video (roughly {t4} min on a T4, "
+                    "much less on an L4/A100)")
             _run(video, wav, result, vae=vae, steps=steps, seed=seed, frames=frames, work=tmp / f"work_{k}")
             synced.append(result)
         video = synced[0]

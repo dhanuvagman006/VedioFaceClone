@@ -103,6 +103,8 @@ def main() -> None:
     )
     frames_file = os.path.join(args.temp, "video.mp4")  # written by the pipeline before it muxes
     os.replace(frames_file if os.path.exists(frames_file) else muxed, args.out)
+    print(f"[face] LatentSync peak GPU memory: {torch.cuda.max_memory_reserved() / 2**30:.1f} of "
+          f"{props.total_memory / 2**30:.0f} GB", flush=True)
 
 
 if __name__ == "__main__":
