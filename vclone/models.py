@@ -22,6 +22,10 @@ SD_VAE_REPO = "stabilityai/sd-vae-ft-mse"
 WHISPER_TINY_REPO = "openai/whisper-tiny"
 FACE_PARSE_REPO = "ManyOtherFunctions/face-parse-bisent"  # the source MuseTalk's own download script uses
 
+# GFPGAN v1.4 face restoration (Apache-2.0), official TencentARC release; sharpens the lip-synced mouth.
+GFPGAN_URL = "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth"
+GFPGAN_BYTES = 348_632_874
+
 LIPSYNC_FILES = {
     MUSETALK_REPO: ["musetalkV15/unet.pth", "musetalkV15/musetalk.json"],
     SD_VAE_REPO: ["config.json", "diffusion_pytorch_model.safetensors"],
@@ -43,6 +47,32 @@ def setup_env() -> None:
     warnings.filterwarnings("ignore")
     import transformers
     transformers.logging.set_verbosity_error()
+
+
+def auto_qwen_size(device: str = "cuda:0") -> str:
+    """The 1.7B voice model clones more closely but needs ~8 GB in fp32 (e.g. Colab's T4); 4 GB cards get 0.6B."""
+    import torch
+    if device.startswith("cuda") and torch.cuda.is_available():
+        if torch.cuda.get_device_properties(torch.device(device)).total_memory >= 10 * 2**30:
+            return "1.7b"
+    return "0.6b"
+
+
+def url_file(url: str, folder: str, expected_bytes: int | None = None) -> Path:
+    """A single file downloaded from `url` into models\\<folder>\\ the first time (size-checked)."""
+    target = MODELS_DIR / folder / url.rsplit("/", 1)[-1]
+    if target.exists() and (expected_bytes is None or target.stat().st_size == expected_bytes):
+        return target
+    import torch
+    target.parent.mkdir(parents=True, exist_ok=True)
+    print(f"[models] downloading {url} -> {target} (first run only)", flush=True)
+    partial = target.with_name(target.name + ".part")
+    torch.hub.download_url_to_file(url, str(partial), progress=True)
+    if expected_bytes is not None and partial.stat().st_size != expected_bytes:
+        partial.unlink()
+        raise RuntimeError(f"Download of {url} is incomplete; run again")
+    partial.replace(target)
+    return target
 
 
 def model_dir(repo_id: str, allow_patterns: list[str] | None = None) -> Path:

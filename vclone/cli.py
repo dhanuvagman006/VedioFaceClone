@@ -75,8 +75,9 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--xvector-only", action="store_true",
                    help="qwen: clone from the speaker embedding only (use if your recording is in an "
                         "unsupported language)")
-    v.add_argument("--qwen-size", choices=["0.6b", "1.7b"], default="0.6b",
-                   help="qwen model size; 1.7b needs about 6 GB of VRAM (default 0.6b)")
+    v.add_argument("--qwen-size", choices=["auto", "0.6b", "1.7b"], default="auto",
+                   help="qwen model size: auto (default) uses 1.7b, the closer clone, on GPUs with 10 GB+ "
+                        "(e.g. Colab's T4) and 0.6b on smaller ones")
     v.add_argument("--temperature", type=float, help="qwen: sampling temperature (default 0.9)")
     v.add_argument("--top-p", type=float, help="qwen: nucleus sampling (default 1.0)")
     v.add_argument("--steps", type=int, help="f5: flow-matching steps (32 default, 64 for max)")
@@ -86,6 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--face", metavar="FILE",
                    help="video (or photo) of the person to lip-sync; default: your recording when it is a video")
     t.add_argument("--refresh-face", action="store_true", help="re-analyse the face video instead of using the cache")
+    t.add_argument("--restore", type=float, default=0.8, metavar="0-1",
+                   help="sharpen the lip-synced mouth with GFPGAN face restoration: 0 = off, 1 = strongest "
+                        "(default 0.8)")
 
     o = p.add_argument_group("output")
     o.add_argument("--pause", type=float, default=0.3, help="silence between sentences in seconds (0.3)")

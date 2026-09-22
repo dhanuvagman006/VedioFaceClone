@@ -79,7 +79,8 @@ Works from any folder, e.g. `D:\GPU\speak.bat C:\rec\me.mp4 "Hi"`. Run `speak.ba
 | `--seed N` | Reproducible output (the seed of every run is printed) |
 | `--pause 0.3` / `--paragraph-pause 0.7` | Silence between sentences / paragraphs (seconds) |
 | `--loudness -18` | Output loudness in LUFS (-16 for podcasts) |
-| `--qwen-size 1.7b` | Bigger voice model: closer voice, needs ~8 GB VRAM (fine on Colab's T4, not on a 4 GB card) |
+| `--restore 0.8` | Sharpen the lip-synced mouth with GFPGAN: `0` off, `0.5` subtle, `1` strongest (default 0.8) |
+| `--qwen-size auto` | Voice model: `auto` (default) picks 1.7B, the closer clone, on GPUs with 10 GB+ (Colab's T4) and 0.6B on smaller ones |
 | `--refresh-voice` / `--refresh-face` | Re-analyse the recording / face video instead of using the cache |
 | `-V`, `--save-takes` | Show every take's score / keep every take as a WAV |
 
@@ -93,8 +94,11 @@ Works from any folder, e.g. `D:\GPU\speak.bat C:\rec\me.mp4 "Hi"`. Run `speak.ba
 * **Emotion:** the voice carries the tone of the text (punctuation, `!`, `?`) and of the recording. The face shows
   the expressions from the recording. It doesn't invent new ones per sentence (e.g. a sudden laugh); models
   that do need 24 GB+ GPUs.
-* **Limits:** the mouth region is generated at 256×256, so on 1080p close-ups it is slightly softer than the rest
-  of the face. Moustaches and exact lip colour can come out a little different. Side profiles don't work well.
+* **Sharpness:** MuseTalk generates the mouth region at 256×256, which is soft on close-ups where the face is
+  600–900 px wide. So each frame's face is then aligned to 512 px and sharpened with **GFPGAN** face restoration,
+  pasted back only where the mouth was regenerated (`--restore`). Filming at arm's length, head and shoulders in
+  view, still gives the most natural result.
+* **Limits:** moustaches and exact lip colour can come out a little different. Side profiles don't work well.
 
 Measured on the RTX A2000 Laptop (4 GB):
 
@@ -117,7 +121,7 @@ text ─► clean ─► sentence-aware chunks ─► Qwen3-TTS clones the voice
 check ─► Whisper word errors + WavLM voice match + pace ─► best take per chunk; misread chunks get another round
 master ─► natural pauses, -18 LUFS, peak limiter
 lip sync ─► Whisper-tiny audio features ─► MuseTalk UNet (one step, fp16) ─► VAE decode ─► blend mouth into
-            the real frame ─► H.264 + AAC MP4
+            the real frame ─► GFPGAN sharpens the mouth (aligned 512 px face, fixed noise) ─► H.264 + AAC MP4
 ```
 
 Only one model sits on the GPU at a time, so it all fits in 4 GB (peak ~2.7 GB). Details that keep it fast there:
@@ -162,8 +166,9 @@ Check that `git status` lists no `.mp4`, `.wav` or `.m4a` files before committin
 
 Colab notes:
 * A Colab machine is wiped when the session ends, so setup runs again in each new session (~5–10 min). Set
-  `KEEP_MODELS_ON_DRIVE = True` to keep the models in Google Drive instead (needs ~12 GB free).
-* The T4 has 15 GB of VRAM, so `--qwen-size 1.7b` (a closer voice) works there.
+  `KEEP_MODELS_ON_DRIVE = True` to keep the models in Google Drive instead (needs ~15 GB free).
+* The T4 has 15 GB of VRAM, so the bigger 1.7B voice model (a closer clone) is used there automatically.
+* After pushing new code, re-run step 1 of the notebook: it pulls the latest version.
 * For a **private** repo, the clone needs a GitHub token: `https://<token>@github.com/<you>/<repo>.git`.
   The repo holds no personal data, so a public one works too.
 * On Linux or Colab use `./speak.sh` instead of `speak.bat`; `bash setup.sh` replaces `setup.ps1`.
@@ -183,7 +188,7 @@ Colab notes:
 
 ```
 vclone\            the pipeline: cli, pipeline, reference (voice clip), engines (TTS), quality (take checks),
-                   lipsync (talking video), text, audio, models, download
+                   lipsync (talking video), restore + gfpgan_arch (mouth sharpening), text, audio, models, download
 speak.bat/.sh      launchers (Windows / Linux + Colab)
 setup.ps1/.sh      one-time setup (Windows / Linux + Colab): packages, MuseTalk code, models
 colab.ipynb        Google Colab notebook
@@ -206,5 +211,5 @@ speak("my_voice.m4a", "Hello!", "hello.wav", quality="fast", language="english")
 
 Only clone people who agreed to it, and don't use clones to impersonate anyone or deceive viewers or listeners.
 Outputs carry an `AI-generated` tag in their metadata. Licenses: MuseTalk (MIT; its weights allow commercial use),
-Qwen3-TTS (Apache-2.0) and Whisper (MIT) are permissive. The F5-TTS weights are non-commercial only. Check the
+Qwen3-TTS (Apache-2.0), GFPGAN (Apache-2.0) and Whisper (MIT) are permissive. The F5-TTS weights are non-commercial only. Check the
 other components' licenses before commercial use.

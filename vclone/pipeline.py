@@ -121,7 +121,8 @@ def run(args, log=print) -> Path:
                          xvector_only=xvector_only, temperature=args.temperature, top_p=args.top_p,
                          steps=args.steps or f5_steps, speed=args.speed)
     spell_out = engine.normalize_numbers and lang == "english"
-    log(f"[tts] loading {args.engine} on {device} (language: {lang})")
+    model = f"qwen {engine.size}" if args.engine == "qwen" else args.engine
+    log(f"[tts] loading {model} on {device} (language: {lang})")
     engine.load()
     if args.verbose and getattr(engine, "accel", None):
         log(f"[tts] code predictor speed-up: {engine.accel}")
@@ -167,7 +168,7 @@ def run(args, log=print) -> Path:
     if avatar:
         with tempfile.TemporaryDirectory() as tmp:
             wav = A.save_audio(Path(tmp) / "speech.wav", speech, SAMPLE_RATE)
-            render(avatar, wav, out, device, log=log)
+            render(avatar, wav, out, device, restore=args.restore, log=log)
     else:
         out_sr = args.sample_rate or SAMPLE_RATE
         if out_sr != SAMPLE_RATE:

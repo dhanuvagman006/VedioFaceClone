@@ -29,7 +29,7 @@ FACE = 256          # face crop resolution the model works at
 MAX_SECONDS = 60    # longer face videos are trimmed; shorter ones play forward then backward
 MAX_SIDE = 1920     # 4K phone video is scaled down to 1080p
 AVATARS_DIR = ROOT / "avatars"
-PREP_VERSION = 1
+PREP_VERSION = 2  # v2 adds points.npy (face restoration)
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".wmv"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 AI_TAG = "AI-generated: synthetic voice and lip sync (vclone)"
@@ -61,6 +61,7 @@ class Avatar:
     crop_boxes: np.ndarray  # (N, 4) larger boxes the blend masks cover
     latents: torch.Tensor   # (N, 8, 32, 32) fp16: masked + reference VAE latents per frame
     size: tuple[int, int]   # frame width, height
+    points: np.ndarray      # (N, 5, 2) eye centres, nose tip, mouth corners: aligns the face restoration
 
     def mask(self, i: int) -> np.ndarray:
         return cv2.imread(str(self.folder / "masks" / f"{i:06d}.png"), cv2.IMREAD_GRAYSCALE)
@@ -124,17 +125,21 @@ def _detect_face(fa, rgb: np.ndarray) -> np.ndarray | None:
     return np.array(det[:4], dtype=np.float64) / scale
 
 
-def _face_boxes(frames: list[Path], device: str, log, detect_every: int = 10) -> np.ndarray:
+def _face_boxes(frames: list[Path], device: str, log, detect_every: int = 10) -> tuple[np.ndarray, np.ndarray]:
     """MuseTalk's face box from 68 facial landmarks: from the chin up to the same distance above
     the nose, and landmark-wide. (MuseTalk gets the landmarks from DWPose, which needs mmcv; FAN
     gives the same 68-point layout without it.) The detector runs every few frames; in between,
-    its box follows the landmarks, which is far faster and just as accurate for a talking head."""
+    its box follows the landmarks, which is far faster and just as accurate for a talking head.
+    Also returns 5 points per frame (eyes, nose, mouth corners) for aligning the face restoration."""
     import face_alignment
+
+    from .restore import five_points
     fa = face_alignment.FaceAlignment(face_alignment.LandmarksType.TWO_D, device=device, flip_input=False,
                                       compile=False,
                                       dtype=torch.float16 if device.startswith("cuda") else torch.float32)
     torch.backends.cudnn.benchmark = False  # face_alignment switches it on globally
     boxes = np.full((len(frames), 4), np.nan)
+    points = np.full((len(frames), 5, 2), np.nan)
     det, anchor = None, None
     for i, path in enumerate(frames):
         rgb = cv2.cvtColor(cv2.imread(str(path)), cv2.COLOR_BGR2RGB)
@@ -148,6 +153,7 @@ def _face_boxes(frames: list[Path], device: str, log, detect_every: int = 10) ->
                 marks, scores, _ = fa.get_landmarks_from_image(rgb, detected_faces=[det], return_landmark_score=True)
             if marks and float(np.mean(scores[0])) > 0.2:
                 lm = marks[0]
+                points[i] = five_points(lm)
                 centre = lm.mean(axis=0)
                 if anchor is not None:  # follow the head until the next detection
                     det = det + np.tile(centre - anchor, 2)
@@ -170,9 +176,12 @@ def _face_boxes(frames: list[Path], device: str, log, detect_every: int = 10) ->
         raise ValueError(f"A face was found in only {found.sum()} of {len(frames)} frames. Use a video where "
                          "the face stays visible, front-on and well lit.")
     idx = np.arange(len(frames))
+    flat = points.reshape(len(frames), 10)
     for c in range(4):  # frames where the face was missed borrow from their neighbours
         boxes[:, c] = np.interp(idx, idx[found], boxes[found, c])
-    return np.round(_smooth(boxes)).astype(int)
+    for c in range(10):
+        flat[:, c] = np.interp(idx, idx[found], flat[found, c])
+    return np.round(_smooth(boxes)).astype(int), _smooth(flat).reshape(-1, 5, 2).astype(np.float32)
 
 
 @torch.inference_mode()
@@ -265,10 +274,11 @@ def prepare_avatar(src: str | Path, device: str, *, refresh: bool = False, max_s
         frames = _extract_frames(src, folder / "frames", max_seconds)
         size = cv2.imread(str(frames[0])).shape[1::-1]
         log(f"[face] {len(frames)} frames at {size[0]}x{size[1]}, {FPS} fps")
-        boxes = _face_boxes(frames, device, log)
+        boxes, points = _face_boxes(frames, device, log)
         latents = _encode_latents(frames, boxes, device)
         crop_boxes = _blend_masks(frames, boxes, folder / "masks", device, log)
         np.save(folder / "boxes.npy", boxes)
+        np.save(folder / "points.npy", points)
         np.save(folder / "crop_boxes.npy", crop_boxes)
         torch.save(latents, folder / "latents.pt")
         info_path.write_text(json.dumps({
@@ -284,7 +294,7 @@ def prepare_avatar(src: str | Path, device: str, *, refresh: bool = False, max_s
     if len(frames) != info["frames"] or len(latents) != info["frames"]:
         raise RuntimeError(f"The face cache in {folder} is incomplete; run again with --refresh-face")
     return Avatar(folder, frames, np.load(folder / "boxes.npy"), np.load(folder / "crop_boxes.npy"), latents,
-                  tuple(info["size"]))
+                  tuple(info["size"]), np.load(folder / "points.npy"))
 
 
 # ----------------------------------------------------------------------------- rendering
@@ -368,9 +378,38 @@ def _blend(frame: np.ndarray, face: np.ndarray, box, mask: np.ndarray, crop_box)
     return frame
 
 
+def _restore_pass(avatar: Avatar, generated: list, composite_one, write, strength: float, device: str, log) -> None:
+    """Second pass: blend each generated mouth into its frame, then sharpen it with GFPGAN."""
+    from .restore import MouthRestorer
+    try:
+        restorer = MouthRestorer(device, strength)
+    except Exception as exc:  # e.g. no network for the one-time download: still deliver the lip sync
+        log(f"[face] mouth sharpening unavailable ({type(exc).__name__}: {exc}); writing the video without it")
+        restorer = None
+    started, chunk = time.time(), 16
+    for start in range(0, len(generated), chunk):
+        part = generated[start:start + chunk]
+        frames = [composite_one(j, face) for j, face in part]
+        if restorer is not None:
+            idx = [j for j, _ in part]
+            restorer.process(frames, [avatar.points[j] for j in idx], [avatar.mask(j) for j in idx],
+                             [avatar.crop_boxes[j] for j in idx])
+        for frame in frames:
+            write(frame)
+        done = start + len(part)
+        if done % 256 < chunk or done == len(generated):
+            log(f"[face] sharpening the mouth {done}/{len(generated)} frames")
+    if restorer is not None:
+        log(f"[face] sharpening took {time.time() - started:.0f}s")
+    del restorer
+    free_gpu()
+
+
 @torch.inference_mode()
-def render(avatar: Avatar, audio: Path, out: Path, device: str, *, batch: int = 8, log=print) -> Path:
-    """Write `out` (.mp4): the avatar's footage with the mouth re-generated to speak `audio`."""
+def render(avatar: Avatar, audio: Path, out: Path, device: str, *, batch: int = 8, restore: float = 0.8,
+           log=print) -> Path:
+    """Write `out` (.mp4): the avatar's footage with the mouth re-generated to speak `audio`.
+    `restore` > 0 sharpens the generated mouth with GFPGAN (0 = off, 1 = full strength)."""
     from concurrent.futures import ThreadPoolExecutor
 
     _import_musetalk()
@@ -395,15 +434,22 @@ def render(avatar: Avatar, audio: Path, out: Path, device: str, *, batch: int = 
     log(f"[face] lip-syncing {total} frames ({total / FPS:.1f}s)")
     writer = _VideoWriter(out, avatar.size, audio)
     last: list[np.ndarray] = []
+    restoring = restore > 0
+    generated: list[tuple[int, np.ndarray]] = []  # (frame index, 256 px mouth) for the sharpening pass
+
+    def composite_one(j: int, face: np.ndarray) -> np.ndarray:
+        x1, y1, x2, y2 = (int(v) for v in avatar.boxes[j])
+        face = cv2.resize(np.ascontiguousarray(face), (x2 - x1, y2 - y1), interpolation=cv2.INTER_LANCZOS4)
+        return _blend(cv2.imread(str(avatar.frames[j])), face, (x1, y1, x2, y2), avatar.mask(j),
+                      [int(v) for v in avatar.crop_boxes[j]])
+
+    def write(frame: np.ndarray) -> None:
+        writer.write(frame)
+        last[:] = [frame]
 
     def composite(idx, faces):  # CPU side, overlapped with the next batch on the GPU
         for j, face in zip(idx, faces):
-            x1, y1, x2, y2 = (int(v) for v in avatar.boxes[j])
-            face = cv2.resize(np.ascontiguousarray(face), (x2 - x1, y2 - y1), interpolation=cv2.INTER_LANCZOS4)
-            frame = _blend(cv2.imread(str(avatar.frames[j])), face, (x1, y1, x2, y2), avatar.mask(j),
-                           [int(v) for v in avatar.crop_boxes[j]])
-            writer.write(frame)
-            last[:] = [frame]
+            write(composite_one(j, face))
 
     pending = None
     try:
@@ -416,19 +462,25 @@ def render(avatar: Avatar, audio: Path, out: Path, device: str, *, batch: int = 
                 faces = vae.decode(pred / vae.config.scaling_factor).sample
                 faces = ((faces.float() / 2 + 0.5).clamp(0, 1) * 255).round().byte()
                 faces = faces.permute(0, 2, 3, 1).cpu().numpy()[..., ::-1]  # RGB -> BGR
-                if pending is not None:
-                    pending.result()  # frames must reach ffmpeg in order
-                pending = pool.submit(composite, idx, faces)
+                if restoring:
+                    generated.extend((j, np.ascontiguousarray(face)) for j, face in zip(idx, faces))
+                else:
+                    if pending is not None:
+                        pending.result()  # frames must reach ffmpeg in order
+                    pending = pool.submit(composite, idx, faces)
                 done = min(total, start + batch)
                 if done % (batch * 25) < batch or done == total:
                     log(f"[face] {done}/{total} frames")
             if pending is not None:
                 pending.result()
+        unet = vae = pos = None  # the sharpening model gets the GPU to itself (one model at a time)
+        free_gpu()
+        if restoring:
+            _restore_pass(avatar, generated, composite_one, write, restore, device, log)
         if last:
             writer.write(last[0])  # one spare frame so the video never ends before the audio
     finally:
         writer.close()
-    del unet, vae
     free_gpu()
     log(f"[face] lip sync took {time.time() - started:.0f}s")
     return out

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time setup on Linux or Google Colab: CUDA PyTorch, both TTS engines, lip sync, and all models (~12 GB).
+# One-time setup on Linux or Google Colab: CUDA PyTorch, both TTS engines, lip sync, and all models (~12-15 GB).
 #   bash setup.sh            creates .venv (a normal Linux PC)
 #   bash setup.sh --system   installs into the current Python (Colab does this automatically)
 set -euo pipefail

@@ -15,7 +15,7 @@ import types
 import numpy as np
 import torch
 
-from .models import F5_REPO, QWEN_BASE, VOCOS_REPO, model_dir
+from .models import F5_REPO, QWEN_BASE, VOCOS_REPO, auto_qwen_size, model_dir
 from .quality import spoken_chars
 
 SAMPLE_RATE = 24000
@@ -56,9 +56,10 @@ class QwenEngine(Engine):
     name = "qwen"
     batch_size = 6  # token-by-token generation is launch-bound on small GPUs: extra takes are nearly free
 
-    def __init__(self, device: str, size: str = "0.6b", language: str = "auto",
+    def __init__(self, device: str, size: str = "auto", language: str = "auto",
                  xvector_only: bool = False, temperature: float | None = None, top_p: float | None = None):
-        self.device, self.size, self.language = device, size, language
+        self.device, self.language = device, language
+        self.size = auto_qwen_size(device) if size == "auto" else size
         self.xvector_only = xvector_only
         self.gen_kwargs = {k: v for k, v in dict(temperature=temperature, top_p=top_p).items() if v is not None}
         self.model = self.prompt = None
@@ -197,7 +198,7 @@ def check_language(engine: str, language: str) -> None:
 
 def make_engine(name: str, device: str, **opts) -> Engine:
     if name == "qwen":
-        return QwenEngine(device, size=opts.get("qwen_size", "0.6b"), language=opts.get("language", "auto"),
+        return QwenEngine(device, size=opts.get("qwen_size", "auto"), language=opts.get("language", "auto"),
                           xvector_only=opts.get("xvector_only", False),
                           temperature=opts.get("temperature"), top_p=opts.get("top_p"))
     if name == "f5":
