@@ -8,9 +8,11 @@ import time
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 import torch
 
 from . import audio as A
+from . import latentsync
 from .engines import SAMPLE_RATE, check_language, free_gpu, language_name, make_engine
 from .lipsync import VIDEO_EXTS, is_video, prepare_avatar, render
 from .models import COMMAND, ROOT
@@ -87,29 +89,121 @@ def _judge(chunks, takes, todo, ref, lang, device, log):
     free_gpu()
 
 
-def run(args, log=print) -> Path:
-    t_start = time.time()
+def _lipsync_engine(args, face) -> str | None:
+    """auto: LatentSync where setup.sh installed it (Linux/Colab) and the GPU has 15 GB+, else MuseTalk."""
+    if face is None:
+        return None
+    if args.lipsync == "auto":
+        return "latentsync" if latentsync.usable() else "musetalk"
+    if args.lipsync == "latentsync" and not latentsync.installed():
+        raise ValueError("LatentSync isn't set up here. It runs on Linux/Colab after `bash setup.sh`; "
+                         "use --lipsync musetalk on this machine.")
+    return args.lipsync
+
+
+def _device(args, log) -> str:
     device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
     if device.startswith("cpu"):
         log("[warn] no CUDA GPU found - running on CPU will be slow")
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
+    return device
 
+
+def _voice_child(options: dict, out: str, wav: str) -> None:
+    """Separate process (spawn) that makes the speech for LatentSync. When it exits, all the GPU memory
+    the voice models used is truly free again; a live process can keep gigabytes reserved."""
+    import argparse
+    import sys
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    from .models import setup_env
+    setup_env()
+    log = lambda msg: print(msg, flush=True)  # noqa: E731
+    try:
+        args = argparse.Namespace(**options)
+        text = clean_text(args.text)
+        speech, _, gen_seconds = _voice(args, _device(args, log), text, language_name(args.language, text),
+                                        Path(out), None, log)
+        A.save_audio(Path(wav), speech, SAMPLE_RATE)
+        log(f"[tts] speech ready: {len(speech) / SAMPLE_RATE:.1f}s, generated in {gen_seconds:.1f}s")
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        print(f"error: {exc}", file=sys.stderr, flush=True)
+        sys.exit(1)
+
+
+def _voice_in_child(args, out: Path, wav: Path) -> None:
+    import multiprocessing
+    proc = multiprocessing.get_context("spawn").Process(target=_voice_child, args=(dict(vars(args)), str(out), str(wav)))
+    proc.start()
+    proc.join()
+    if proc.exitcode != 0 or not wav.exists():
+        raise RuntimeError("the voice step failed (see the message above)")
+
+
+def run(args, log=print) -> Path:
+    t_start = time.time()
     text = clean_text(args.text)
     if not spoken_chars(text):
         raise ValueError("There is no text to speak.")
     lang = language_name(args.language, text)
     check_language(args.engine, lang)
+    face = _face_source(args)
+    out = Path(args.out) if args.out else _default_out(args.text, ".mp4" if face else ".wav")
+    lipsync = _lipsync_engine(args, face)
+
+    if lipsync == "latentsync":
+        log("[face] lip sync: LatentSync 1.6")
+        cycle = latentsync.prepare_face(face, refresh=args.refresh_face, log=log)
+        # The voice runs in a process of its own and exits before LatentSync starts, so LatentSync
+        # (which needs most of a 15 GB T4) gets the whole GPU. This process never touches the GPU.
+        with tempfile.TemporaryDirectory(prefix="vclone_") as tmp:
+            wav = Path(tmp) / "speech.wav"
+            _voice_in_child(args, out, wav)
+            latentsync.render(cycle, wav, out, steps=args.lipsync_steps,
+                              seed=args.seed if args.seed is not None else 1247, log=log)
+            duration = sf.info(str(wav)).duration
+        log(f"[out] {out}  ({duration:.1f}s video, total {time.time() - t_start:.0f}s)")
+        return out
+    if lipsync == "musetalk":
+        why = ""
+        if args.lipsync == "auto":
+            why = (" (LatentSync, the more realistic engine, needs a 15 GB+ GPU)" if latentsync.installed() else
+                   " (LatentSync, the more realistic engine, is set up by setup.sh on Linux/Colab)")
+        log(f"[face] lip sync: MuseTalk 1.5{why}")
+
+    device = _device(args, log)
+    speech, avatar, gen_seconds = _voice(args, device, text, lang, out, face, log)
+    out_sr = SAMPLE_RATE
+    if avatar:
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = A.save_audio(Path(tmp) / "speech.wav", speech, SAMPLE_RATE)
+            render(avatar, wav, out, device, restore=0.8 if args.restore is None else args.restore, log=log)
+    else:
+        out_sr = args.sample_rate or SAMPLE_RATE
+        if out_sr != SAMPLE_RATE:
+            speech = A.resample(speech, SAMPLE_RATE, out_sr)
+        A.save_audio(out, speech, out_sr)
+    log(f"[out] {out}  ({len(speech) / out_sr:.1f}s of audio, generated in {gen_seconds:.1f}s, "
+        f"total {time.time() - t_start:.1f}s)")
+    return out
+
+
+def _voice(args, device: str, text: str, lang: str, out: Path, face: Path | None, log):
+    """Reference clip -> TTS takes -> Whisper and voice checks -> mastered 24 kHz speech.
+    With `face` (MuseTalk) the face video is analysed right after the voice clip, so a video without a
+    usable face fails before the slow voice work. Returns (speech, avatar or None, generation seconds)."""
     n_takes, f5_steps = QUALITY_PRESETS[args.quality]
     n_takes = max(1, args.takes or n_takes)
     judging = n_takes > 1 or args.check
-    face = _face_source(args)
 
     ref = prepare_reference(args.ref, transcriber_factory=lambda: Transcriber(device),
                             ref_text=args.ref_text, language=language_code(args.ref_language),
                             refresh=args.refresh_voice, log=log)
     free_gpu()
-    # Analyse the face before the voice work, so a video without a usable face fails fast.
     avatar = prepare_avatar(face, device, refresh=args.refresh_face, log=log) if face else None
     xvector_only = args.xvector_only
     if not ref.text_usable:
@@ -163,17 +257,6 @@ def run(args, log=print) -> Path:
             pieces.append(np.zeros(int(chunk.pause_after * SAMPLE_RATE), np.float32))
     speech = np.concatenate(pieces)
     speech = A.normalize_loudness(speech, SAMPLE_RATE, target_lufs=args.loudness, ceiling_db=-1.0)
-    out = Path(args.out) if args.out else _default_out(args.text, ".mp4" if avatar else ".wav")
-    out_sr = SAMPLE_RATE
-    if avatar:
-        with tempfile.TemporaryDirectory() as tmp:
-            wav = A.save_audio(Path(tmp) / "speech.wav", speech, SAMPLE_RATE)
-            render(avatar, wav, out, device, restore=args.restore, log=log)
-    else:
-        out_sr = args.sample_rate or SAMPLE_RATE
-        if out_sr != SAMPLE_RATE:
-            speech = A.resample(speech, SAMPLE_RATE, out_sr)
-        A.save_audio(out, speech, out_sr)
 
     if args.save_takes:
         folder = out.with_name(out.stem + "_takes")
@@ -202,7 +285,4 @@ def run(args, log=print) -> Path:
         if match < GOOD_MATCH:
             log(f"[check] voice match {match:.2f} is weak (your own voice scores ~0.96 against itself). For a "
                 f"closer clone, record 10-20 s in a quiet room reading `{COMMAND} --script`, or use --quality max.")
-    duration = len(speech) / out_sr
-    log(f"[out] {out}  ({duration:.1f}s of audio, generated in {gen_seconds:.1f}s, "
-        f"total {time.time() - t_start:.1f}s)")
-    return out
+    return speech, avatar, gen_seconds

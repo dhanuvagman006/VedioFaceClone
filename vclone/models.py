@@ -22,6 +22,13 @@ SD_VAE_REPO = "stabilityai/sd-vae-ft-mse"
 WHISPER_TINY_REPO = "openai/whisper-tiny"
 FACE_PARSE_REPO = "ManyOtherFunctions/face-parse-bisent"  # the source MuseTalk's own download script uses
 
+# LatentSync 1.6 (ByteDance; code Apache-2.0, weights OpenRAIL++): the realistic lip-sync engine on Colab-class
+# GPUs. Its code lives in third_party\LatentSync with its own Python 3.10 environment (setup.sh builds it).
+LATENTSYNC_CODE = ROOT / "third_party" / "LatentSync"
+LATENTSYNC_COMMIT = "a229c3948406bc2cf6eaf4873e662e70c6a04746"
+LATENTSYNC_REPO = "ByteDance/LatentSync-1.6"
+LATENTSYNC_FILES = ["latentsync_unet.pt", "whisper/tiny.pt"]  # the rest of that repo is only for training
+
 # GFPGAN v1.4 face restoration (Apache-2.0), official TencentARC release; sharpens the lip-synced mouth.
 GFPGAN_URL = "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth"
 GFPGAN_BYTES = 348_632_874

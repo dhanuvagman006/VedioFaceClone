@@ -48,8 +48,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--voice", dest="voice_opt", metavar="FILE", help="same as the first argument")
     p.add_argument("-t", "--text", dest="text_opt", metavar="TEXT", help="text to read ('-' reads stdin)")
     p.add_argument("-f", "--text-file", metavar="FILE", help="read the text from a .txt file")
-    p.add_argument("-o", "--out", metavar="FILE", help="output file (.wav .flac .mp3 .m4a .ogg); "
-                                                        "default: outputs\\<time>_<words>.wav")
+    p.add_argument("-o", "--out", metavar="FILE", help="output file: .mp4 for a talking video, or .wav .flac .mp3 "
+                                                        ".m4a .ogg for audio; default: outputs\\<time>_<words>.mp4 "
+                                                        "(video recording or --face) or .wav")
     p.add_argument("--script", action="store_true",
                    help="print a short text to read aloud for your voice recording, then exit")
 
@@ -87,9 +88,16 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--face", metavar="FILE",
                    help="video (or photo) of the person to lip-sync; default: your recording when it is a video")
     t.add_argument("--refresh-face", action="store_true", help="re-analyse the face video instead of using the cache")
-    t.add_argument("--restore", type=float, default=0.8, metavar="0-1",
-                   help="sharpen the lip-synced mouth with GFPGAN face restoration: 0 = off, 1 = strongest "
-                        "(default 0.8)")
+    t.add_argument("--lipsync", choices=["auto", "latentsync", "musetalk"], default="auto",
+                   help="lip-sync engine: latentsync = LatentSync 1.6, most realistic (512 px, needs a 15 GB+ GPU "
+                        "such as Colab's T4; slow: about 20-40 min per 30 s of video on a T4); musetalk = MuseTalk "
+                        "1.5, fast (~3 s per second of video on a 4 GB GPU) but a softer mouth. auto (default) = "
+                        "latentsync where setup.sh installed it and the GPU is big enough, else musetalk")
+    t.add_argument("--lipsync-steps", type=int, default=20, metavar="N",
+                   help="latentsync: denoising steps (default 20; 10-15 is faster, slightly less detailed)")
+    t.add_argument("--restore", type=float, metavar="0-1",
+                   help="musetalk: sharpen the lip-synced mouth with GFPGAN face restoration: 0 = off, "
+                        "1 = strongest (default 0.8)")
 
     o = p.add_argument_group("output")
     o.add_argument("--pause", type=float, default=0.3, help="silence between sentences in seconds (0.3)")

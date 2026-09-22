@@ -1,8 +1,9 @@
 """Fetch every model once so later runs work offline:  python -m vclone.download [--all]"""
 import sys
 
-from .models import (F5_REPO, GFPGAN_BYTES, GFPGAN_URL, LIPSYNC_FILES, MODELS_DIR, QWEN_BASE, SPEAKER_REPO,
-                     VOCOS_REPO, WHISPER_REPO, auto_qwen_size, model_dir, setup_env, url_file)
+from .models import (F5_REPO, GFPGAN_BYTES, GFPGAN_URL, LATENTSYNC_FILES, LATENTSYNC_REPO, LIPSYNC_FILES,
+                     MODELS_DIR, QWEN_BASE, SPEAKER_REPO, VOCOS_REPO, WHISPER_REPO, auto_qwen_size, model_dir,
+                     setup_env, url_file)
 
 
 def main() -> None:
@@ -18,6 +19,9 @@ def main() -> None:
     for repo, files in LIPSYNC_FILES.items():  # talking-video models (MuseTalk 1.5)
         model_dir(repo, allow_patterns=files)
     url_file(GFPGAN_URL, "GFPGAN", GFPGAN_BYTES)  # sharpens the lip-synced mouth
+    from . import latentsync
+    if latentsync.installed():  # Linux/Colab after setup.sh: the realistic lip-sync engine (~5 GB)
+        model_dir(LATENTSYNC_REPO, allow_patterns=LATENTSYNC_FILES)
     import face_alignment  # its face detector + 68-point landmark weights land in models\torch
     face_alignment.FaceAlignment(face_alignment.LandmarksType.TWO_D, device="cpu", flip_input=False,
                                  compile=False)  # torch.compile needs Triton, which Windows lacks
