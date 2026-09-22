@@ -1,0 +1,11 @@
+# Keep the CUDA build of PyTorch that setup installs; pip must not swap it out.
+torch==2.8.0
+torchaudio==2.8.0
+torchvision==0.23.0
+# torchcodec release that matches torch 2.8 (pulled in by f5-tts)
+torchcodec==0.7.0
+# qwen-tts needs transformers 4.57.x, which needs huggingface_hub < 1.0 (newer diffusers want 1.x)
+transformers==4.57.3
+huggingface_hub==0.36.2
+# OpenCV 4.x: the lip-sync code is written against it
+opencv-python<5

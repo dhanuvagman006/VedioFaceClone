@@ -1,0 +1,13 @@
+# Install PyTorch first (CUDA build), see setup.ps1:
+#   pip install torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128
+qwen-tts==0.1.1
+# talking video (MuseTalk 1.5 lip sync; its code is vendored in third_party\MuseTalk)
+diffusers==0.39.0
+opencv-python==4.14.0.94
+face-alignment==1.5.0
+f5-tts==1.1.22
+transformers==4.57.3
+imageio-ffmpeg==0.6.0
+pyloudnorm==0.2.0
+num2words==0.5.14
+soxr==1.1.0

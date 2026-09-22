@@ -1,0 +1,207 @@
+# vclone: a person's own voice and face, saying any text
+
+Give it a **~30 second video** of a person talking to the camera plus a **text script**, and it makes a video of
+that person saying the script **in their own cloned voice, lip-synced**. It keeps their real head movement,
+blinks and expressions. Or give it just a voice recording and get audio.
+Runs offline on a small NVIDIA GPU (built on an RTX A2000 Laptop, 4 GB), or on **Google Colab**.
+
+```bat
+:: Windows
+speak.bat person.mp4 -f script.txt -o talking.mp4          (video in -> talking video out)
+speak.bat my_voice.m4a "Hello! This is my cloned voice."    (voice in -> audio out)
+```
+```bash
+# Linux / Google Colab: same options
+./speak.sh person.mp4 -f script.txt -o talking.mp4
+```
+
+Results go to `outputs\` unless you pass `-o`. The first run with a new video analyses the voice and face once
+(a few minutes). Later scripts with the same video reuse that and only generate the new speech and lip sync.
+
+---
+
+## 1. Record the input (this matters most for quality)
+
+**The video** (for talking videos):
+* 25–60 seconds of the person talking to the camera. Face visible and roughly front-on, good light, steady camera.
+* The output reuses their real footage, so record the head movement and expressions you want to see
+  (e.g. friendly and relaxed). Only the mouth region is regenerated.
+* One person, nothing covering the mouth. Portrait or landscape both work; 4K is scaled to 1080p.
+
+**The voice** (comes from the same video, or from any audio file):
+* **Best: read the built-in script.** `speak.bat --script` prints a ~10 s text. If the person reads it in the
+  recording, the tool recognizes it and learns the voice from the exact words. A wrong transcript makes
+  the clone sound like someone else.
+* Quiet room (no fan, TV or music), mic ~20 cm away, speaking naturally. Energy, pace and accent are copied.
+* Any format works: `.mp4 .mov .webm` video, or `.wav .mp3 .m4a .ogg/.opus .flac` audio.
+
+The voice clip (5–12 s) and its transcript are cached in `voices\<name>-<id>\`, and the face analysis in
+`avatars\<name>-<id>\`. **Check the transcript it prints.** If Whisper wasn't sure or got a word wrong, fix
+`voices\<name>-<id>\ref.txt` (or pass `--ref-text "exact words"`) and run again. Accents and noise can fool
+the language guess; force it with `--ref-language english` (or `hindi`, `tamil`, ...).
+
+**Reading the check line:** `voice match` compares each take with the recording. A voice scores about 0.96
+against itself. Above 0.93 is a close clone; below 0.90 the tool tells you how to improve the recording.
+
+## 2. Use it
+
+```bat
+:: talking video from a 30 s video + script file
+speak.bat person.mp4 -f script.txt -o talking.mp4
+
+:: voice from one file, face from another video (or a photo, which gives a static head)
+speak.bat voice.m4a "Some text" --face person.mp4 -o talking.mp4
+
+:: audio only (an audio file name as output)
+speak.bat person.mp4 "Text to read" -o hello.wav
+
+:: quick draft (1 take, no checking) vs. best quality (5 takes)
+speak.bat person.mp4 "Quick test" --quality fast -o test.mp4
+speak.bat person.mp4 -f script.txt --quality max -o final.mp4
+
+:: other languages: their voice speaking French
+speak.bat person.mp4 "Bonjour à tous, comment allez-vous ?" --language french -o fr.mp4
+```
+
+Works from any folder, e.g. `D:\GPU\speak.bat C:\rec\me.mp4 "Hi"`. Run `speak.bat -h` for all options.
+
+| Option | What it does |
+|---|---|
+| `-o FILE` | `.mp4` = talking video; `.wav` (default without a face), `.flac`, `.mp3`, `.m4a`, `.ogg` = audio |
+| `-f FILE` | Read the text from a `.txt` file |
+| `-q fast/high/max` | 1, 3 (default) or 5 takes per sentence group; the best take wins |
+| `--face FILE` | Video (or photo) to lip-sync; default: the recording itself when it is a video |
+| `--engine qwen/f5` | Voice model: `qwen` (default) or `f5` (a second opinion, English/Chinese only) |
+| `-l LANG` | Language of the text: `auto` (default), english, chinese, japanese, korean, german, french, russian, portuguese, spanish, italian |
+| `--script` | Print the ~10 s text to read aloud in the recording |
+| `--ref-text "..."` | Exact words spoken in the recording (under 15 s: used whole; longer: matched to the chosen clip) |
+| `--ref-language LANG` | Language spoken in the recording, if the automatic guess is wrong |
+| `--seed N` | Reproducible output (the seed of every run is printed) |
+| `--pause 0.3` / `--paragraph-pause 0.7` | Silence between sentences / paragraphs (seconds) |
+| `--loudness -18` | Output loudness in LUFS (-16 for podcasts) |
+| `--qwen-size 1.7b` | Bigger voice model: closer voice, needs ~8 GB VRAM (fine on Colab's T4, not on a 4 GB card) |
+| `--refresh-voice` / `--refresh-face` | Re-analyse the recording / face video instead of using the cache |
+| `-V`, `--save-takes` | Show every take's score / keep every take as a WAV |
+
+## 3. What to expect
+
+* **Voice:** cloned from the recording. Best of 3 takes, each checked by Whisper for misread words and
+  by a speaker-verification model for how much it sounds like the person.
+* **Lip sync:** MuseTalk 1.5 regenerates the mouth region to match every syllable and blends it into the real
+  footage. Head motion, blinks and eyes are the person's own. If the script is longer than the video, the
+  footage plays forward then backward, so there are no jumps.
+* **Emotion:** the voice carries the tone of the text (punctuation, `!`, `?`) and of the recording. The face shows
+  the expressions from the recording. It doesn't invent new ones per sentence (e.g. a sudden laugh); models
+  that do need 24 GB+ GPUs.
+* **Limits:** the mouth region is generated at 256×256, so on 1080p close-ups it is slightly softer than the rest
+  of the face. Moustaches and exact lip colour can come out a little different. Side profiles don't work well.
+
+Measured on the RTX A2000 Laptop (4 GB):
+
+| Job | Time |
+|---|---|
+| First use of a new 30 s video (voice + face analysis, once) | ~3–4 min |
+| 30 s script → talking video (voice best of 3 + lip sync) | ~2–3 min |
+| One sentence, audio only, best of 3 | ~15–30 s |
+
+Every video is tagged `AI-generated` in its MP4 metadata.
+
+## 4. How it works
+
+```
+recording ─► voice clip: decode, trim, shorten pauses, pick best 5-12 s, level ─► transcript (script words
+             or Whisper, language limited to what the voice model speaks) ─► cached in voices\
+face video ─► 25 fps frames ─► face box per frame (68 landmarks, smoothed) ─► VAE latents + jaw-shaped blend
+             masks (face parsing) ─► cached in avatars\
+text ─► clean ─► sentence-aware chunks ─► Qwen3-TTS clones the voice: 3 takes per chunk (bf16, CUDA graphs)
+check ─► Whisper word errors + WavLM voice match + pace ─► best take per chunk; misread chunks get another round
+master ─► natural pauses, -18 LUFS, peak limiter
+lip sync ─► Whisper-tiny audio features ─► MuseTalk UNet (one step, fp16) ─► VAE decode ─► blend mouth into
+            the real frame ─► H.264 + AAC MP4
+```
+
+Only one model sits on the GPU at a time, so it all fits in 4 GB (peak ~2.7 GB). Details that keep it fast there:
+* Qwen3-TTS's code predictor is replayed with **CUDA graphs** (`vclone\qwen_fast.py`, ~2× faster, identical
+  logits in float32).
+* The VAE decodes one face at a time, because batches spill into system RAM on a 4 GB card and run 5× slower.
+* The face video is analysed once and cached.
+
+| Voice engine | `qwen` (default) | `f5` |
+|---|---|---|
+| Model | Qwen3-TTS-12Hz-0.6B-Base | F5-TTS v1 Base |
+| Languages | 10 (see `-l`) | English, Chinese |
+| License | Apache-2.0 | CC-BY-NC-4.0 (non-commercial) |
+
+## 5. Put it on GitHub and run it in Google Colab
+
+**Push the code.** `.gitignore` keeps the models (~12 GB), the virtual environment, and all personal
+data (`voices\`, `avatars\`, `outputs\`, audio and video files) out of the repository. Only the code goes up:
+
+```bat
+cd D:\GPU
+git init
+git add .
+git status
+git commit -m "vclone: voice cloning + lip-synced talking video"
+git branch -M main
+git remote add origin https://github.com/<your-username>/<your-repo>.git
+git push -u origin main
+```
+
+Check that `git status` lists no `.mp4`, `.wav` or `.m4a` files before committing.
+
+**Run it in Colab.**
+1. Open `https://colab.research.google.com/github/<your-username>/<your-repo>/blob/main/colab.ipynb`
+   (or upload `colab.ipynb` at colab.research.google.com).
+2. **Runtime → Change runtime type → T4 GPU.**
+3. Put your repo URL in `REPO_URL` and run the cells from top to bottom. They install everything, download
+   the models, ask you to upload the video, and give you the talking video to download.
+
+Colab notes:
+* A Colab machine is wiped when the session ends, so setup runs again in each new session (~5–10 min). Set
+  `KEEP_MODELS_ON_DRIVE = True` to keep the models in Google Drive instead (needs ~12 GB free).
+* The T4 has 15 GB of VRAM, so `--qwen-size 1.7b` (a closer voice) works there.
+* For a **private** repo, the clone needs a GitHub token: `https://<token>@github.com/<you>/<repo>.git`.
+  The repo holds no personal data, so a public one works too.
+* On Linux or Colab use `./speak.sh` instead of `speak.bat`; `bash setup.sh` replaces `setup.ps1`.
+
+## 6. Troubleshooting
+
+* **Doesn't sound like the person**: have them read the `--script` text in the recording (in a quiet room);
+  check the transcript it prints / `ref.txt`; try `--quality max`.
+* **A word is mispronounced**: run again (new seed) or `--quality max`. Spell unusual names phonetically.
+* **"A face was found in only N frames"**: use a video where the face stays visible and front-on.
+* **Mouth looks soft on a 1080p close-up**: expected at 256 px; filming slightly further away hides it.
+* **GPU out of memory**: close other GPU apps (games, browsers with hardware video), use `--quality fast`.
+* **The recording is in a language Qwen doesn't speak**: the voice is still cloned from its timbre
+  (automatically, or force it with `--xvector-only`).
+
+## 7. Files
+
+```
+vclone\            the pipeline: cli, pipeline, reference (voice clip), engines (TTS), quality (take checks),
+                   lipsync (talking video), text, audio, models, download
+speak.bat/.sh      launchers (Windows / Linux + Colab)
+setup.ps1/.sh      one-time setup (Windows / Linux + Colab): packages, MuseTalk code, models
+colab.ipynb        Google Colab notebook
+models\            downloaded models, ~12 GB                   (not in git)
+third_party\       MuseTalk 1.5 code at a pinned commit         (not in git; setup downloads it)
+voices\ avatars\   cached voice clips and face analyses         (private, not in git)
+outputs\           generated audio and video                    (private, not in git)
+.venv\             Python 3.11, PyTorch 2.8 + CUDA 12.8 (Windows)
+```
+
+Python API (with this folder on `PYTHONPATH`):
+
+```python
+from vclone import speak
+speak("person.mp4", "Hello from Python!", "hello.mp4")                  # talking video
+speak("my_voice.m4a", "Hello!", "hello.wav", quality="fast", language="english")
+```
+
+## 8. Use it responsibly
+
+Only clone people who agreed to it, and don't use clones to impersonate anyone or deceive viewers or listeners.
+Outputs carry an `AI-generated` tag in their metadata. Licenses: MuseTalk (MIT; its weights allow commercial use),
+Qwen3-TTS (Apache-2.0) and Whisper (MIT) are permissive. The F5-TTS weights are non-commercial only. Check the
+other components' licenses before commercial use.

@@ -1,0 +1,29 @@
+# Python environment and caches
+.venv/
+__pycache__/
+*.pyc
+.pip-cache/
+
+# Downloaded at setup: models (~12 GB) and MuseTalk's code
+models/
+third_party/
+
+# Personal data. Voice recordings, face videos and everything made from them stay off GitHub.
+voices/
+avatars/
+outputs/
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.ogg
+*.opus
+*.flac
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.avi
+*.jpg
+*.jpeg
+*.png
